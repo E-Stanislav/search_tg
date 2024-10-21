@@ -3,13 +3,13 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import re, os, requests
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-from telebot import types
+from keyboard import search, back_keyboard
 
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv('TOKEN')
 bot = telebot.TeleBot(TOKEN)
-
+URLTOKEN = ""
 # Define static pages
 PAGES = [
     [[InlineKeyboardButton("Коридор", url="https://example.com/corridor")], [InlineKeyboardButton("➡️ Вперёд", callback_data='next_page')]],
@@ -37,13 +37,35 @@ def send_welcome(message):
 @bot.message_handler(content_types="text")
 def main(message):
     if message.text == "Поиск канала":
-        bot.send_message(message.chat.id, "🧾Hello! You can find tg channels", reply_markup=search())
+        bot.send_message(
+            message.chat.id,
+            "Введи слово для поиска:",
+            reply_markup=back_keyboard(),
+        )
+        bot.register_next_step_handler(message, search_channel)
     elif message.text == "Категории":
         result_dict = fetch_categories()
         global PAGES
         PAGES = form_keyboard(result_dict)
         send_menu(message.chat.id, 0)
     else:
+        bot.send_message(message.chat.id, "🧾Hello! You can find tg channels", reply_markup=search())
+        
+def search_channel(message):
+    if message.text == "Back":
+        bot.send_message(message.chat.id, "🧾Hello! You can find tg channels", reply_markup=search())
+    elif message.text == "Поиск канала":
+        bot.send_message(
+            message.chat.id,
+            "Введи слово для поиска:",
+            reply_markup=back_keyboard(),
+        )
+        bot.register_next_step_handler(message, search_channel)
+    else:
+        bot.send_message(message.chat.id, "⌛Collecting info...")
+        global PAGES
+        result_dict = process_query(query=message.text)
+        PAGES = form_keyboard(result_dict)
         send_menu(message.chat.id, 0)
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -55,11 +77,6 @@ def callback_inline(call):
         send_menu(call.message.chat.id, current_page - 1, call.message.message_id)
     elif call.data == "remove_menu":
         bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="Меню убрано.")
-
-def search():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("Поиск канала", "Категории")
-    return markup
 
 def fetch_categories():
     headers = {
@@ -83,8 +100,10 @@ def form_keyboard(input_dict):
         page_buttons = [[InlineKeyboardButton(name, url=link)] for name, link in page]
         
         # Add navigation buttons depending on the page's position
-        if i == 0:
+        if i == 0 and len(pages) == 1:
             # First page, only "next" and "remove menu"
+            navigation_buttons = []
+        elif i == 0:
             navigation_buttons = [InlineKeyboardButton("➡️ Вперёд", callback_data='next_page')]
         elif i < len(pages) - 1:
             # Inner pages, "prev", "next", and "remove menu"
@@ -100,6 +119,60 @@ def form_keyboard(input_dict):
         result_pages.append(page_buttons + [navigation_buttons])
     
     return result_pages
+
+def get_token():
+    headers = {
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'accept-language': 'ru,en;q=0.9',
+        'priority': 'u=0, i',
+        'upgrade-insecure-requests': '1',
+    }
+
+    response = requests.get('https://tlgrm.ru/channels/blogs', headers=headers)
+    return re.findall(r"typesense_api_key\"\:\"(.*?)\"", response.text)[0]
+
+def get_channels(token: str, query: str, page: str = "1", per_page: str = "8"):
+    headers = {
+        'accept': '*/*',
+        'accept-language': 'ru,en;q=0.9',
+        'origin': 'https://tlgrm.ru',
+        'priority': 'u=1, i',
+        'referer': 'https://tlgrm.ru/',
+        'x-typesense-api-key': token,
+    }
+
+    params = {
+        'q': query,
+        'query_by': 'name,tags,link',
+        'per_page': per_page,
+        'page': page,
+        'query_by_weights': '120,120,10',
+        'sort_by': '_eval(official:true):desc,subscribers:desc,_text_match:desc',
+        'filter_by': 'lang:[na,ru]',
+        'highlight_fields': '_',
+        'min_len_1typo': '5',
+        'min_len_2typo': '8',
+    }
+
+    response = requests.get('https://typesense.tlgrm.app/collections/channels/documents/search', params=params, headers=headers)
+    return response.json()
+
+
+def process_query(query: str):
+    token = get_token()
+    per_page = 8
+
+    # Fetch first page and calculate total pages
+    list_chan = get_channels(token=token, query=query, per_page=per_page)
+    all_pages = list_chan["hits"]
+    total_pages = round(list_chan["found"] / per_page)
+
+    # Fetch remaining pages if applicable
+    for page in range(2, total_pages + 1):
+        all_pages += get_channels(token=token, query=query, page=str(page), per_page=per_page)["hits"]
+
+    # Create the result dictionary
+    return {f'{i["document"]["name"]} || {i["document"]["subscribers"]}': f'https://t.me/{i["document"]["link"]}' for i in all_pages}
 
 
 bot.polling()

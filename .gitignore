@@ -1,2 +1,4 @@
 .env
 file.ipynb
+
+__pycache__
